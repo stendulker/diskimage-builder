@@ -19,24 +19,32 @@ set -o pipefail
 
 function build_efiboot_img() {
 
-    cat > "$TMP_BUILD_DIR/grub-embedded.cfg" << END_CONFIG
-search --set=root --label VMEDIA_BOOT_ISO
-set prefix=(\$root)/EFI/BOOT/
-END_CONFIG
-
-    grub-mkimage --format=x86_64-efi --output=$TMP_BUILD_DIR/bootx64.efi \
-    --config=$TMP_BUILD_DIR/grub-embedded.cfg --compression=xz \
-    --prefix=/EFI/BOOT part_gpt part_msdos fat ext2 hfs hfsplus \
-    iso9660 udf ufs1 ufs2 zfs chain linux boot appleldr ahci \
-    configfile normal regexp minicmd reboot halt search \
-    search_fs_file search_fs_uuid search_label gfxterm gfxmenu \
-    efi_gop efi_uga all_video loadbios gzio echo true probe \
-    loadenv bitmap_scale font cat help ls png jpeg tga test \
-    at_keyboard usb_keyboard
+#    cat > "$TMP_BUILD_DIR/grub-embedded.cfg" << END_CONFIG
+#search --set=root --label VMEDIA_BOOT_ISO
+#set prefix=(\$root)/EFI/BOOT/
+#END_CONFIG
+#    grub-mkimage --format=x86_64-efi --output=$TMP_BUILD_DIR/bootx64.efi \
+#    --config=$TMP_BUILD_DIR/grub-embedded.cfg --compression=xz \
+#    --prefix=/EFI/BOOT part_gpt part_msdos fat ext2 hfs hfsplus \
+#    iso9660 udf ufs1 ufs2 zfs chain linux boot appleldr ahci \
+#    configfile normal regexp minicmd reboot halt search \
+#    search_fs_file search_fs_uuid search_label gfxterm gfxmenu \
+#    efi_gop efi_uga all_video loadbios gzio echo true probe \
+#    loadenv bitmap_scale font cat help ls png jpeg tga test \
+#    at_keyboard usb_keyboard
 
     # Create a FAT formatted image that contains bootx64.efi in the /EFI/BOOT
     # directory.  This is used to bootstrap GRUB from the ISO image.
-    dd if=/dev/zero of=$TMP_BUILD_DIR/efiboot.img bs=1K count=1440
+
+    if [ $DISTRO_NAME = "fedora" ]; then
+        cp /home/shiv/fedora/shim.efi $TMP_BUILD_DIR/bootx64.efi
+        cp /home/shiv/fedora/grubx64.efi $TMP_BUILD_DIR/grubx64.efi
+    else
+        cp /usr/lib/shim/shim.efi.signed $TMP_BUILD_DIR/bootx64.efi
+        cp /usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed $TMP_BUILD_DIR/grubx64.efi
+    fi
+
+    dd if=/dev/zero of=$TMP_BUILD_DIR/efiboot.img bs=1K count=5760
     mkdosfs -F 12 $TMP_BUILD_DIR/efiboot.img
 
     # Create a temporary mount point:
@@ -45,6 +53,8 @@ END_CONFIG
     sudo mount -o loop $TMP_BUILD_DIR/efiboot.img $MOUNTPOINT
     sudo mkdir -p $MOUNTPOINT/EFI/BOOT
     sudo cp $TMP_BUILD_DIR/bootx64.efi $MOUNTPOINT/EFI/BOOT
+    sudo cp $TMP_BUILD_DIR/grubx64.efi $MOUNTPOINT/EFI/BOOT
+echo $MOUNTPOINT
     sudo umount $MOUNTPOINT
     rmdir $MOUNTPOINT
     cp $TMP_BUILD_DIR/efiboot.img $TMP_IMAGE_DIR/isolinux
@@ -60,7 +70,18 @@ function build_iso() {
     SCRIPTNAME=$(basename $0)
     SCRIPTDIR=$(dirname $0)
     MKISOFS="/usr/bin/mkisofs"
-    EFI_BOOT_DIR="EFI/BOOT"
+
+    if [ $DISTRO_NAME = "fedora" ]; then
+       EFI_BOOT_DIR="EFI/fedora"
+       GRUB_LINUX_TAG="linuxefi"
+       GRUB_INITRD_TAG="initrdefi"
+       EXTRA_KERNEL_PARAMS="usbcore.autosuspend=-1" 
+    else
+       EFI_BOOT_DIR="EFI/ubuntu"
+       GRUB_LINUX_TAG="linux"
+       GRUB_INITRD_TAG="initrd"
+       EXTRA_KERNEL_PARAMS="" 
+    fi
 
     # Create a temporary build directory for holiding the contents of iso
     TMP_IMAGE_DIR="$TMP_BUILD_DIR/image"
@@ -73,11 +94,11 @@ function build_iso() {
 
     # TODO(rameshg87): Something similar to pkg-map can be used here.
     # But pkg-map doesn't work for cleanup scripts right now.
-    if [ $DISTRO_NAME = "fedora" ]; then
-        ISOLINUX_BIN=/usr/share/syslinux/isolinux.bin
-    else
+#    if [ $DISTRO_NAME = "fedora" ]; then
+#        ISOLINUX_BIN=/usr/share/syslinux/isolinux.bin
+#    else
         ISOLINUX_BIN=/usr/lib/syslinux/isolinux.bin
-    fi
+#    fi
 
     cp $ISOLINUX_BIN "$TMP_IMAGE_DIR/isolinux"
 
@@ -101,7 +122,7 @@ PROMPT 0
 END_CONFIG
 
 
-    echo "Creating EFI/BOOT directory"
+    echo "Creating EFI/ubuntu directory"
     mkdir -p "$TMP_IMAGE_DIR/$EFI_BOOT_DIR"
 
     # Generate grub.cfg for default booting
@@ -112,8 +133,8 @@ set timeout="5"
 set hidden_timeout_quiet=false
 
 menuentry "install" {
-    linux /vmlinuz  $KERNEL_CMDLINE_ARGS --
-    initrd /initrd
+    $GRUB_LINUX_TAG /vmlinuz  $EXTRA_KERNEL_PARAMS $KERNEL_CMDLINE_ARGS --
+    $GRUB_INITRD_TAG /initrd
 }
 END_CONFIG
 
@@ -139,6 +160,11 @@ IMAGE_NAME=${IMAGE_NAME:-'image'}
 
 if echo $IMAGE_ELEMENT | grep -q '\bramdisk\b'; then
     EMITTED_KERNEL=$IMAGE_NAME.kernel
+    EMITTED_RAMDISK=$IMAGE_NAME.initramfs
+    EMITTED_KERNEL_CMDLINE_ARGS="boot_method=vmedia"
+    EMITTED_ISO_FILENAME=$IMAGE_NAME.iso
+elif echo $IMAGE_ELEMENT | grep -q '\bironic-agent\b'; then
+    EMITTED_KERNEL=$IMAGE_NAME.vmlinuz
     EMITTED_RAMDISK=$IMAGE_NAME.initramfs
     EMITTED_KERNEL_CMDLINE_ARGS="boot_method=vmedia"
     EMITTED_ISO_FILENAME=$IMAGE_NAME.iso
